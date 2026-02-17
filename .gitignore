@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Environment variables
+.env
+.env.local
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# Project data
+data/state.json
+logs/*.log
+
+# Credentials (если будут)
+config/credentials.json

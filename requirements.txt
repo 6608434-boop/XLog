@@ -1,0 +1,4 @@
+requests
+yadisk[sync-defaults]
+python-dotenv
+python-telegram-bot[job-queue]

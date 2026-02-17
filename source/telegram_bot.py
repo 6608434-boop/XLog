@@ -3,6 +3,7 @@ Telegram бот для XLog — общение с множеством проф�
 """
 
 import logging
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
@@ -12,7 +13,6 @@ from .deepseek_client import DeepSeekClient
 from .yadisk_client import YandexDiskClient
 
 # Словарь для хранения активного профиля каждого пользователя
-# В продакшене лучше использовать Redis или БД, но для начала сойдёт
 user_profiles = {}
 
 
@@ -111,13 +111,31 @@ class TelegramBot:
 
             logger.info(f"User {user_id} selected profile: {profile_name}")
 
-            # Загружаем приветствие из welcome.txt, если есть
+            # Загружаем все файлы профиля
             files = self.profiles.get_profile_files(profile_name)
-            welcome_text = files.get('welcome')
 
+            # Логируем, что пришло
+            logger.info(f"FILES LOADED: {list(files.keys())}")
+            for key, value in files.items():
+                logger.info(f"  {key}: {len(value) if value else 0} chars")
+
+            # ⭐ АГРЕССИВНАЯ ОЧИСТКА WELCOME.TXT
+            raw_welcome = files.get('welcome', '')
+            logger.info(f"RAW WELCOME LENGTH: {len(raw_welcome)}")
+            logger.info(f"RAW WELCOME REPR: {repr(raw_welcome[:100])}")
+
+            # Убираем BOM, пробелы, переводы строк, нулевые символы
+            welcome_text = raw_welcome.strip().strip('\n').strip('\r').strip('\ufeff').strip()
+
+            # Если после всех чисток ничего не осталось — используем запасной вариант
             if not welcome_text:
                 welcome_text = f"✅ Выбран профиль **{profile_name}**. Теперь общаюсь от его имени."
+                logger.info(f"Using default welcome (cleaned text was empty)")
+            else:
+                logger.info(f"Using cleaned welcome ({len(welcome_text)} chars)")
+                logger.info(f"CLEANED WELCOME REPR: {repr(welcome_text[:100])}")
 
+            # Отправляем сообщение с приветствием
             await query.edit_message_text(
                 f"✅ Активен профиль: **{profile_name}**\n\n{welcome_text}",
                 parse_mode='Markdown'
@@ -142,54 +160,78 @@ class TelegramBot:
         # Показываем, что бот печатает
         await update.message.chat.send_action(action="typing")
 
+        # Сохраняем сообщение пользователя СРАЗУ, даже если DeepSeek упадёт
+        self.profiles.save_message(profile_name, "user", user_message, datetime.now())
+
         try:
-            # Загружаем историю для контекста (последние сообщения из Яндекс.Диска)
-            # TODO: загрузить последние N сообщений из логов профиля
+            # Собираем контекст из файлов профиля
+            context_text = self.profiles.build_context(profile_name)
+
+            # Формируем историю для DeepSeek
+            history = []
+            if context_text:
+                history.append({"role": "system", "content": context_text})
 
             # Отправляем в DeepSeek
             response_data = self.deepseek.send_message(
-                chat_id=profile_name,  # используем имя профиля как chat_id
+                chat_id=profile_name,
                 message=user_message,
-                history=[]  # пока без истории
+                history=history
             )
 
             if response_data and response_data.get("content"):
                 assistant_message = response_data["content"]
 
-                # Сохраняем сообщения в Яндекс.Диск
-                from datetime import datetime
-                self.profiles.save_message(profile_name, "user", user_message, datetime.now())
+                # Сохраняем ответ ассистента
                 self.profiles.save_message(profile_name, "assistant", assistant_message, datetime.now())
 
-                # Отправляем ответ
+                # Отправляем ответ пользователю
                 await update.message.reply_text(assistant_message)
-
                 logger.info(f"Response sent to user {user_id}")
+
             else:
-                await update.message.reply_text("❌ Ошибка при получении ответа от DeepSeek")
+                # DeepSeek вернул пустой ответ
+                error_msg = "⚠️ Центр управления полётами (DeepSeek) вернул пустой сигнал."
+                await update.message.reply_text(error_msg)
+
+                # Сохраняем ошибку как системное сообщение в лог
+                self.profiles.save_message(
+                    profile_name,
+                    "system",
+                    f"Ошибка: пустой ответ от DeepSeek",
+                    datetime.now()
+                )
 
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
-            await update.message.reply_text(f"❌ Произошла ошибка: {str(e)}")
+            error_text = str(e)
+            logger.error(f"Ошибка при обращении к DeepSeek: {error_text}")
+
+            # Понятное сообщение пользователю
+            user_error_msg = (
+                "🚫 **Связь с ИИ потеряна**\n\n"
+                "DeepSeek временно не отвечает. Твоё сообщение сохранено в логах.\n"
+                f"Техническая информация: `{error_text[:100]}`"
+            )
+            await update.message.reply_text(user_error_msg, parse_mode='Markdown')
+
+            # Сохраняем факт ошибки в лог профиля
+            self.profiles.save_message(
+                profile_name,
+                "system",
+                f"Ошибка DeepSeek: {error_text}",
+                datetime.now()
+            )
 
     def run(self):
         """Запуск бота"""
-        # Создаём приложение
         self.application = Application.builder().token(self.token).build()
 
-        # Добавляем обработчики команд
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("profile", self.profile_command))
         self.application.add_handler(CommandHandler("list", self.list_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
-
-        # Обработчик кнопок
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
-
-        # Обработчик текстовых сообщений
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         logger.info("Telegram bot started. Press Ctrl+C to stop.")
-
-        # Запускаем бота
         self.application.run_polling(allowed_updates=Update.ALL_TYPES)

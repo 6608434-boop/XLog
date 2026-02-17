@@ -1,151 +1,223 @@
-import json
-import os
-from pathlib import Path
-from typing import List, Dict, Optional, Any
-from datetime import datetime
+"""
+Менеджер профилей XLog — работа с файлами профилей на Яндекс.Диске
+"""
 
-from .logger import logger
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+
 from .yadisk_client import YandexDiskClient
+from .logger import logger
+
+# Типы для удобства
+ProfileDict = Dict[str, Any]
+FilesDict = Dict[str, Optional[str]]
 
 
 class ProfileManager:
-    def __init__(self, disk_client: YandexDiskClient, config_path: str = "config/profiles.json"):
+    """Управляет профилями и их файлами на Яндекс.Диске"""
+
+    # Список файлов, которые должны быть в каждом профиле
+    PROFILE_FILES = ["key.txt", "king.txt", "rules.txt", "library.txt", "welcome.txt"]
+
+    def __init__(self, disk_client: YandexDiskClient, config: Dict[str, Any]):
         """
         Инициализация менеджера профилей.
 
         Args:
-            disk_client: Клиент Яндекс.Диска
-            config_path: Путь к файлу с конфигурацией профилей
+            disk_client: Клиент для работы с Яндекс.Диском
+            config: Конфигурация с информацией о профилях
         """
         self.disk = disk_client
-        self.config = self._load_config(config_path)
-        self.state = self._load_state()
+        self.config = config
+        self.profiles = config.get("profiles", [])
+        logger.info(f"ProfileManager initialized with {len(self.profiles)} profiles")
 
-    def _load_config(self, config_path: str) -> Dict:
-        """Загружает конфигурацию профилей."""
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}")
-            return {"profiles": []}
+    def get_all_profiles(self) -> List[ProfileDict]:
+        """Возвращает список всех доступных профилей"""
+        return self.profiles
 
-    def _load_state(self) -> Dict:
-        """Загружает состояние (последние ID сообщений)."""
-        state_file = Path("data/state.json")
-        if state_file.exists():
-            try:
-                with open(state_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load state: {e}")
-        return {}
-
-    def _save_state(self):
-        """Сохраняет состояние."""
-        try:
-            os.makedirs("data", exist_ok=True)
-            with open("data/state.json", 'w', encoding='utf-8') as f:
-                json.dump(self.state, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Failed to save state: {e}")
-
-    def get_all_profiles(self) -> List[Dict]:
-        """Возвращает список всех профилей."""
-        return self.config.get("profiles", [])
-
-    def get_last_message_id(self, profile_name: str) -> Optional[str]:
-        """Возвращает последний обработанный ID для профиля."""
-        return self.state.get(profile_name, {}).get("last_id")
-
-    def set_last_message_id(self, profile_name: str, last_id: str):
-        """Устанавливает последний обработанный ID для профиля."""
-        if profile_name not in self.state:
-            self.state[profile_name] = {}
-        self.state[profile_name]["last_id"] = last_id
-        self._save_state()
-
-    def is_initialized(self, profile_name: str) -> bool:
-        """Проверяет, была ли загружена история для профиля."""
-        return self.state.get(profile_name, {}).get("initialized", False)
-
-    def set_initialized(self, profile_name: str):
-        """Отмечает, что история для профиля загружена."""
-        if profile_name not in self.state:
-            self.state[profile_name] = {}
-        self.state[profile_name]["initialized"] = True
-        self._save_state()
-
-    def get_profile_files(self, profile_name: str) -> Dict[str, Optional[str]]:
+    def get_profile_files(self, profile_name: str) -> FilesDict:
         """
-        Читает все файлы профиля с Яндекс.Диска.
+        Читает ВСЕ файлы профиля с Яндекс.Диска с защитой от ошибок.
+
+        Если какой-то файл не читается (бинарный, кривая кодировка) —
+        возвращается пустая строка, но остальные файлы загружаются.
 
         Returns:
-            Словарь с содержимым файлов: key, king, rules, library
+            Словарь с содержимым файлов: key, king, rules, library, welcome
         """
         files = {}
-        for file_name in ["key.txt", "king.txt", "rules.txt", "library.txt"]:
-            path = f"{profile_name}/{file_name}"
-            files[file_name.replace('.txt', '')] = self.disk.read_file(path)
+
+        for file_name in self.PROFILE_FILES:
+            key = file_name.replace('.txt', '')
+            try:
+                path = f"{profile_name}/{file_name}"
+                content = self.disk.read_file(path)
+
+                if content:
+                    files[key] = content
+                    logger.debug(f"Loaded {file_name}: {len(content)} chars")
+                else:
+                    files[key] = ""
+                    logger.warning(f"File {file_name} is empty")
+
+            except UnicodeDecodeError as e:
+                # Критично: файл не в UTF-8 (скорее всего бинарный)
+                logger.error(f"Failed to read {file_name}: encoding error - {e}")
+                files[key] = ""  # Пустая строка вместо падения
+
+            except Exception as e:
+                # Любая другая ошибка
+                logger.error(f"Failed to read {file_name}: {e}")
+                files[key] = ""
+
+        # Логируем итог
+        loaded = [k for k, v in files.items() if v]
+        empty = [k for k, v in files.items() if not v]
+        logger.info(f"Profile {profile_name}: loaded {loaded}, empty {empty}")
+
         return files
 
-    def append_to_library(self, profile_name: str, text: str) -> bool:
-        """Добавляет текст в library.txt профиля."""
-        path = f"{profile_name}/library.txt"
-        content = self.disk.read_file(path) or ""
-        content += f"\n[{datetime.now().strftime('%d.%m.%Y %H:%M')}] {text}"
-        return self.disk.write_to_file(path, content)
-
-    def load_full_history(self, profile_name: str, chat_id: str, deepseek_client):
+    def build_context(self, profile_name: str, limit: int = 10) -> str:
         """
-        Загружает полную историю чата и сохраняет в Яндекс.Диск.
-        """
-        if self.is_initialized(profile_name):
-            logger.info(f"Profile {profile_name} already initialized")
-            return
-
-        logger.info(f"Loading full history for {profile_name}...")
-        logger.info("DeepSeek API does not provide chat history")
-        logger.info("Marking profile as initialized without loading history")
-
-        self.set_initialized(profile_name)
-        logger.info(f"Profile {profile_name} marked as initialized")
-
-    def check_new_messages(self, profile_name: str, chat_id: str, deepseek_client):
-        """
-        Проверяет новые сообщения для профиля.
-        DeepSeek API не хранит историю, поэтому просто логируем.
-        """
-        logger.info(f"Checking for new messages: {profile_name}")
-        logger.info("DeepSeek API does not provide message history")
-        logger.debug("Use send_message() to interact with the API")
-
-        # В будущем здесь можно добавить логику отправки сообщений
-        # через deepseek_client.send_message()
-
-        return []
-
-    def save_message(self, profile_name: str, role: str, content: str, timestamp: Optional[datetime] = None):
-        """
-        Сохраняет одно сообщение в Яндекс.Диск.
+        Собирает полный контекст для DeepSeek:
+        - king.txt (личность)
+        - rules.txt (правила)
+        - library.txt (опыт/знания)
+        - последние N сообщений из логов
 
         Args:
             profile_name: Имя профиля
-            role: 'user' или 'assistant'
-            content: Текст сообщения
-            timestamp: Время сообщения (по умолчанию сейчас)
+            limit: Сколько последних сообщений брать
+
+        Returns:
+            Полный текст контекста
         """
-        if timestamp is None:
-            timestamp = datetime.now()
+        files = self.get_profile_files(profile_name)
 
-        log_path = f"{profile_name}/logs/{timestamp.year}/{timestamp.month:02d}/{timestamp.day:02d}/log.txt"
-        time_str = timestamp.strftime("%H:%M:%S")
-        formatted = f"[{time_str}] {role}: {content}\n"
+        parts = []
 
-        success = self.disk.write_to_file(log_path, formatted)
-        if success:
-            logger.info(f"Saved {role} message to {log_path}")
-        else:
-            logger.error(f"Failed to save {role} message")
+        # Личность
+        if files.get('king'):
+            parts.append(f"ТЫ — ЛИЧНОСТЬ:\n{files['king']}\n")
 
-        return success
+        # Правила
+        if files.get('rules'):
+            parts.append(f"ПРАВИЛА ОБЩЕНИЯ:\n{files['rules']}\n")
+
+        # Опыт/знания
+        if files.get('library'):
+            parts.append(f"ТВОИ ЗНАНИЯ И ОПЫТ:\n{files['library']}\n")
+
+        # Последние сообщения
+        recent = self.get_recent_messages(profile_name, limit)
+        if recent:
+            parts.append(f"ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:\n{recent}\n")
+
+        return "\n".join(parts)
+
+    def save_message(self, profile_name: str, role: str, text: str, timestamp: datetime):
+        """
+        Сохраняет сообщение в лог профиля.
+
+        Формат файла: /profiles/{profile_name}/logs/YYYY/MM/DD/log.txt
+        Формат записи: [timestamp] role: текст
+
+        Args:
+            profile_name: Имя профиля
+            role: Роль (user, assistant, system)
+            text: Текст сообщения
+            timestamp: Время сообщения
+        """
+        try:
+            # Путь вида: Logan/logs/2026/02/17/log.txt
+            date_path = timestamp.strftime("%Y/%m/%d")
+            log_path = f"{profile_name}/logs/{date_path}/log.txt"
+
+            # ⭐ СОЗДАЁМ ПАПКИ, ЕСЛИ ИХ НЕТ
+            folder_path = f"{profile_name}/logs/{date_path}"
+            self.disk.ensure_folder_exists(folder_path)
+
+            # Форматируем запись
+            time_str = timestamp.strftime("%H:%M:%S")
+            log_entry = f"[{time_str}] {role}: {text}\n"
+
+            # Пишем в файл (дозаписываем в конец)
+            success = self.disk.append_to_file(log_path, log_entry)
+
+            if success:
+                logger.debug(f"Message saved to {log_path}")
+            else:
+                logger.error(f"Failed to save message to {log_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to save message: {e}")
+
+    def get_recent_messages(self, profile_name: str, limit: int = 10) -> str:
+        """
+        Читает последние сообщения из лога профиля.
+
+        Сначала пытается читать сегодняшний лог,
+        если его нет — вчерашний.
+
+        Args:
+            profile_name: Имя профиля
+            limit: Сколько последних сообщений вернуть
+
+        Returns:
+            Строка с последними сообщениями
+        """
+        today = datetime.now()
+        yesterday = datetime.now().replace(day=today.day - 1)
+
+        # Пробуем сегодня
+        date_path = today.strftime("%Y/%m/%d")
+        log_path = f"{profile_name}/logs/{date_path}/log.txt"
+        content = self.disk.read_file(log_path)
+
+        # Если сегодня нет — пробуем вчера
+        if not content:
+            date_path = yesterday.strftime("%Y/%m/%d")
+            log_path = f"{profile_name}/logs/{date_path}/log.txt"
+            content = self.disk.read_file(log_path)
+
+        if not content:
+            return ""
+
+        # Берём последние limit строк
+        lines = content.strip().split('\n')
+        last_lines = lines[-limit:] if len(lines) > limit else lines
+
+        return '\n'.join(last_lines)
+
+    def add_to_library(self, profile_name: str, text: str) -> bool:
+        """
+        Добавляет текст в library.txt профиля.
+
+        Args:
+            profile_name: Имя профиля
+            text: Текст для добавления
+
+        Returns:
+            True если успешно, False если ошибка
+        """
+        try:
+            path = f"{profile_name}/library.txt"
+
+            # Добавляем с временной меткой
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            entry = f"\n\n[{timestamp}] ДОБАВЛЕНО:\n{text}"
+
+            success = self.disk.append_to_file(path, entry)
+
+            if success:
+                logger.info(f"Added to library for {profile_name}")
+                return True
+            else:
+                logger.error(f"Failed to add to library for {profile_name}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error adding to library: {e}")
+            return False

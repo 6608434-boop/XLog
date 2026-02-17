@@ -1,7 +1,19 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+================================================================================
+ФАЙЛ: deepseek_client.py
+НАЗНАЧЕНИЕ: Клиент для DeepSeek API
+АВТОР: Логан
+ДАТА: 2026-02-17
+ВЕРСИЯ: 2.0 (с поддержкой истории)
+================================================================================
+"""
+
 import requests
 import time
 from typing import List, Dict, Optional, Any
-from datetime import datetime
 
 from .logger import logger
 
@@ -36,9 +48,12 @@ class DeepSeekClient:
         """
         # Подготавливаем messages
         messages = []
+
+        # Сначала добавляем историю (системные сообщения, контекст)
         if history:
             messages.extend(history)
 
+        # Добавляем текущее сообщение пользователя
         messages.append({"role": "user", "content": message})
 
         payload = {
@@ -48,7 +63,7 @@ class DeepSeekClient:
         }
 
         logger.info(f"Sending message to chat {chat_id}")
-        logger.debug(f"Payload: {payload}")
+        logger.debug(f"Messages count: {len(messages)}")
 
         try:
             response = requests.post(
@@ -70,7 +85,7 @@ class DeepSeekClient:
                     "id": data.get("id"),
                     "role": "assistant",
                     "content": assistant_message.get("content", ""),
-                    "created_at": datetime.now().isoformat()
+                    "created": data.get("created")
                 }
             else:
                 logger.error(f"Failed to send message: {response.status_code}")
@@ -87,23 +102,16 @@ class DeepSeekClient:
             return None
 
     def get_new_messages(self, chat_id: str, last_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Этот метод больше не используется, так как DeepSeek API не хранит историю.
-        Возвращает пустой список.
-        """
-        logger.warning("DeepSeek API does not store message history. Use send_message() instead.")
+        """Заглушка для совместимости."""
+        logger.warning("get_new_messages is deprecated")
         return []
 
     def get_chat_history(self, chat_id: str, last_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Этот метод больше не используется.
-        """
-        logger.warning("DeepSeek API does not provide chat history endpoint")
+        """Заглушка для совместимости."""
+        logger.warning("get_chat_history is deprecated")
         return []
 
     def get_all_history(self, chat_id: str) -> List[Dict[str, Any]]:
-        """
-        Этот метод больше не используется.
-        """
-        logger.warning("DeepSeek API does not provide chat history endpoint")
+        """Заглушка для совместимости."""
+        logger.warning("get_all_history is deprecated")
         return []
